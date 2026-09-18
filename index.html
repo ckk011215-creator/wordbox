@@ -420,6 +420,29 @@ code{font-family:var(--font-mono);font-size:12.5px;background:var(--surface-2);p
 .openrow input{width:auto;flex:none;margin-top:3px}
 .openrow b{color:var(--ink);font-weight:500}
 </style>
+<style>
+.answerrow{display:flex;gap:9px;align-items:stretch}
+.answerrow input{
+  flex:1;min-width:0;font-family:var(--font-display);font-size:22px;letter-spacing:-.01em;
+  padding:12px 15px;background:var(--surface);border:2px solid var(--line-strong);border-radius:11px;
+}
+.answerrow input:focus{border-color:var(--accent);outline:none}
+.answerrow .btn{flex:none;padding-inline:20px}
+@media (max-width:440px){
+  .answerrow{flex-wrap:wrap}
+  .answerrow .btn{width:100%}
+}
+.answermeta{display:flex;align-items:center;justify-content:space-between;gap:12px;flex-wrap:wrap;min-height:30px}
+.answered{
+  background:var(--surface-2);border:1px solid var(--line);border-radius:12px;padding:16px 18px;display:grid;gap:5px;
+}
+.answered .typed{font-size:13.5px;color:var(--ink-2)}
+.answered .typed b{font-family:var(--font-mono);font-weight:500}
+.answered .typed.no b{color:var(--critical);text-decoration:line-through}
+.answered .typed.ok b{color:var(--good)}
+.answered .correctword{font-family:var(--font-display);font-size:30px;line-height:1.15;margin-top:2px}
+.answered .exx{font-family:var(--font-display);font-style:italic;color:var(--ink-2);font-size:14.5px;line-height:1.55;margin-top:6px}
+</style>
 </head>
 <body>
 <header class="top">
@@ -750,57 +773,65 @@ function studyNext(){
   render();
 }
 
+/* --- answer checking --- */
+function reEsc(x){ return String(x).replace(/[.*+?^${}()|[\]\\]/g,"\\$&"); }
+function norm(x){
+  return String(x||"").toLowerCase()
+    .replace(/[‘’]/g,"'")
+    .replace(/[^a-z0-9' -]/g,"")
+    .replace(/\s+/g," ")
+    .trim();
+}
+
 function buildQuestions(ids){
   var qs=[];
   ids.forEach(function(id){
     var w=wordById(id);
-    if(!w) return;
-    var others=shuffle(S.pool.filter(function(x){
-      return x.id!==id && x.word && x.meaning;
-    })).slice(0,3);
-    if(others.length<3) return;
-    var kinds=["en2zh","zh2en"];
-    if(w.example && w.example.toLowerCase().indexOf(String(w.word).toLowerCase().slice(0,4))>=0) kinds.push("cloze");
-    var kind=kinds[Math.floor(Math.random()*kinds.length)];
-    var opts;
-    if(kind==="en2zh") opts=[w.meaning].concat(others.map(function(o){return o.meaning;}));
-    else opts=[w.word].concat(others.map(function(o){return o.word;}));
-    var order=shuffle([0,1,2,3]);
-    qs.push({
-      id:id, kind:kind, word:w,
-      opts:order.map(function(k){return opts[k];}),
-      ans:order.indexOf(0),
-      picked:null, tookMs:0
-    });
+    if(!w || !w.word) return;
+    var canCloze = !!(w.example && new RegExp(reEsc(w.word),"i").test(w.example));
+    var kind = (canCloze && Math.random()<0.45) ? "cloze" : "define";
+    qs.push({id:id, kind:kind, word:w, typed:"", answered:false, grade:null, tookMs:0});
   });
   return qs;
 }
 
 function startQuiz(mode, ids){
   var qs=buildQuestions(ids);
-  if(!qs.length){ flash("Not enough words in the box to build a quiz (4 minimum). Add a few more first."); render(); return; }
-  S.session={mode:mode, qs:qs, i:0, correct:0, deadline:Date.now()+QUIZ_SEC*1000, timeouts:0};
+  if(!qs.length){ flash("No words available to build a quiz. Add a few to the box first."); render(); return; }
+  S.session={mode:mode, qs:qs, i:0, correct:0, deadline:Date.now()+QUIZ_SEC*1000, timeouts:0, draft:""};
   render();
 }
 
-function answer(k){
+function submitAnswer(timedOut){
   var s=S.session;
   if(!s || (s.mode!=="quiz" && s.mode!=="review")) return;
   var q=s.qs[s.i];
-  if(q.picked!==null) return;
+  if(q.answered) return;
+  var box=el("qInput");
+  var typed=(box ? box.value : (s.draft||""));
+  if(!timedOut && !String(typed).trim()) return;    // 空白唔算提交
   stopTimer();
   q.tookMs = QUIZ_SEC*1000 - Math.max(0, s.deadline-Date.now());
-  q.picked = k;                       // -1 = timed out
-  if(k===q.ans) s.correct++;
-  if(k===-1) s.timeouts++;
+  q.typed = String(typed||"").trim();
+  q.answered = true;
+  if(timedOut){
+    q.grade = "timeout";
+    s.timeouts++;
+  }else{
+    q.grade = (norm(q.typed)===norm(q.word.word)) ? "right" : "wrong";
+  }
+  if(q.grade==="right") s.correct++;
+  s.draft="";
   render();
 }
+
 
 function nextQuestion(){
   var s=S.session;
   s.i++;
   if(s.i<s.qs.length){
     s.deadline = Date.now()+QUIZ_SEC*1000;
+    s.draft="";
     render();
     return;
   }
@@ -814,7 +845,7 @@ function finishQuiz(){
   s.qs.forEach(function(q){
     var c=p.cards[q.id] || {b:0, due:nextDue(0), s:0, c:0, w:0};
     c.s=(c.s||0)+1;
-    var ok=q.picked===q.ans;
+    var ok=(q.grade==="right");
     if(ok){
       c.c=(c.c||0)+1;
       c.b=Math.min(GRADUATED,(c.b||0)+1);
@@ -857,7 +888,7 @@ function startTimer(){
   var s=S.session;
   if(!s || (s.mode!=="quiz" && s.mode!=="review")) return;
   var q=s.qs[s.i];
-  if(!q || q.picked!==null) return;
+  if(!q || q.answered) return;
   var fill=el("qFill"), sec=el("qSec");
   if(!fill||!sec) return;
   var total=QUIZ_SEC*1000;
@@ -872,7 +903,7 @@ function startTimer(){
     sc.textContent=secs+"s";
     f.className="fill"+(left<=5000?" low":"")+(left<=0?" out":"");
     sc.className="sec"+(left<=5000?" low":"");
-    if(left<=0){ stopTimer(); answer(-1); }
+    if(left<=0){ stopTimer(); submitAnswer(true); }
   },100);
 }
 
@@ -977,7 +1008,7 @@ function renderToday(){
     h+='<div class="panel" style="margin-top:22px"><div class="panel-h"><h2>How it works</h2></div>'+
       '<ol style="margin:0 0 16px;padding-left:20px;display:grid;gap:7px;color:var(--ink-2);font-size:14px">'+
       '<li>Everyone picks words out of the book they are reading, writes each on a slip and drops it in the shared box.</li>'+
-      '<li>Before you head out, draw <b>5 words</b> blind, study them, then check in with the quiz - '+QUIZ_SEC+' seconds a question.</li>'+
+      '<li>Before you head out, draw <b>5 words</b> blind, study them, then check in with the quiz: you get the meaning and <b>type the word back</b>, '+QUIZ_SEC+' seconds a question.</li>'+
       '<li>After that the cards come back on a schedule: '+STEPS.map(function(x){return x.label;}).join(" &rarr; ")+'.</li>'+
       '<li>Settle up at the weekend on the leaderboard and the growth curve.</li>'+
       '</ol>'+
@@ -1054,47 +1085,62 @@ function studyPanel(s){
 
 function quizPanel(s){
   var q=s.qs[s.i], w=q.word;
+  return typeQuizPanel(s,q,w);
+}
+
+function typeQuizPanel(s,q,w){
   var h='<div class="panel"><div class="panel-h"><h2>'+(s.mode==="review"?"Review quiz":"Today\'s quiz")+'</h2>'+
     '<span class="note">Question '+(s.i+1)+' of '+s.qs.length+' · '+s.correct+' right</span></div>';
   h+='<div class="q">';
-  if(q.picked!==null){
+
+  /* timer */
+  if(q.answered){
     var used=(q.tookMs/1000);
     h+='<div class="qtimer"><div class="track"><div class="fill out" style="width:0%"></div></div>'+
-       '<span class="sec">'+(q.picked===-1 ? "timed out" : (used<0.1?0.1:used).toFixed(1)+"s")+'</span></div>';
+       '<span class="sec">'+(q.grade==="timeout" ? "timed out" : (used<0.1?0.1:used).toFixed(1)+"s")+'</span></div>';
   }else{
     h+='<div class="qtimer"><div class="track"><div class="fill" id="qFill"></div></div>'+
        '<span class="sec" id="qSec">'+QUIZ_SEC+'s</span></div>';
   }
+
+  /* prompt */
   h+='<div class="prompt">';
-  if(q.kind==="en2zh"){
-    h+='<div class="eyebrow">What does this word mean?</div><div class="big">'+esc(w.word)+'</div>';
-  }else if(q.kind==="zh2en"){
-    h+='<div class="eyebrow">Which word fits?</div><div class="big zh">'+posTag(w)+esc(w.meaning)+'</div>';
-  }else{
-    var re=new RegExp(String(w.word).replace(/[.*+?^${}()|[\]\\]/g,"\\$&"),"i");
+  if(q.kind==="cloze"){
+    var re=new RegExp(reEsc(w.word),"i");
     var sent=esc(w.example).replace(re,"____");
-    h+='<div class="eyebrow">Fill in the blank</div><div class="cloze">'+sent.replace("____","<u></u>")+'</div>';
-  }
-  h+='</div><div class="opts">';
-  var letters=["A","B","C","D"];
-  q.opts.forEach(function(o,k){
-    var cls="opt";
-    if(q.picked!==null){
-      if(k===q.ans) cls+=" right";
-      else if(k===q.picked) cls+=" wrong";
-    }
-    h+='<button class="'+cls+'" data-opt="'+k+'"'+(q.picked!==null?" disabled":"")+'>'+
-       '<span class="lt">'+letters[k]+'</span><span>'+esc(o)+'</span></button>';
-  });
-  h+='</div>';
-  if(q.picked!==null){
-    var ok=q.picked===q.ans;
-    var head = ok ? "Correct" : (q.picked===-1 ? "Out of time (counts as wrong)" : "Not quite");
-    h+='<div class="verdict '+(ok?"ok":"no")+'">'+head+' — '+
-       posTag(w)+esc(w.word)+' - '+esc(w.meaning)+'</div>';
-    h+='<button class="btn wide" id="qNext">'+(s.i+1<s.qs.length?"Next question":"See results")+'</button>';
+    h+='<div class="eyebrow">Type the missing word</div>'+
+       '<div class="cloze">'+sent.replace("____","<u></u>")+'</div>';
   }else{
+    h+='<div class="eyebrow">Type the word that means this</div>'+
+       '<div class="big zh">'+posTag(w)+esc(w.meaning)+'</div>';
+  }
+  h+='</div>';
+
+  /* answer box */
+  if(!q.answered){
+    h+='<form class="answerrow" id="qForm">'+
+       '<input id="qInput" type="text" placeholder="type the English word" '+
+       'autocomplete="off" autocorrect="off" autocapitalize="off" spellcheck="false" '+
+       'value="'+esc(s.draft||"")+'">'+
+       '<button class="btn" type="submit">Check</button></form>';
+    h+='<div class="answermeta">'+
+       '<span class="tiny">Spelling counts — one wrong letter is wrong</span>'+
+       '<span class="tiny">'+esc(w.word.length)+' letters</span></div>';
     h+='<div class="verdict"></div>';
+  }else{
+    var ok = (q.grade==="right");
+    var head, cls;
+    if(ok){ head="Correct"; cls="ok"; }
+    else if(q.grade==="timeout"){ head="Out of time"; cls="no"; }
+    else { head="Not quite"; cls="no"; }
+    h+='<div class="answered">';
+    if(q.typed) h+='<div class="typed '+(ok?"ok":"no")+'">You wrote: <b>'+esc(q.typed)+'</b></div>';
+    h+='<div class="correctword">'+posTag(w)+'<b>'+esc(w.word)+'</b></div>';
+    h+='<div class="tiny">'+esc(w.meaning)+'</div>';
+    if(w.example) h+='<div class="exx">“'+esc(w.example)+'”</div>';
+    h+='</div>';
+    h+='<div class="verdict '+cls+'">'+head+'</div>';
+    h+='<button class="btn wide" id="qNext">'+(s.i+1<s.qs.length?"Next question":"See results")+'</button>';
   }
   h+='</div></div>';
   return h;
@@ -1111,7 +1157,7 @@ function resultPanel(s){
      '<div class="stat"><div class="k">Points</div><div class="v">+'+s.gained+'</div></div>'+
      '</div>';
   if(s.timeouts) h+='<p class="tiny" style="margin-bottom:12px">'+s.timeouts+' question'+(s.timeouts>1?"s":"")+' timed out - past '+QUIZ_SEC+' seconds it counts as not knowing it.</p>';
-  var wrong=s.qs.filter(function(q){return q.picked!==q.ans;});
+  var wrong=s.qs.filter(function(q){return q.grade!=="right";});
   if(wrong.length){
     h+='<div class="eyebrow" style="margin-bottom:8px">Worth another look</div><div class="slipgrid">';
     wrong.forEach(function(q,i){ h+=slipHTML(q.word,false,i); });
@@ -1131,9 +1177,12 @@ function wireSession(){
   if(c) c.onclick=function(){ S.session.flipped=!S.session.flipped; render(); };
   bind("stYes", studyNext);
   bind("stNo", studyNext);
-  Array.prototype.forEach.call(document.querySelectorAll("[data-opt]"),function(b){
-    b.onclick=function(){ answer(+b.getAttribute("data-opt")); };
-  });
+  var qf=el("qForm"), qi=el("qInput");
+  if(qf) qf.onsubmit=function(ev){ ev.preventDefault(); submitAnswer(false); };
+  if(qi){
+    qi.oninput=function(){ if(S.session) S.session.draft=qi.value; };
+    try{ qi.focus(); qi.setSelectionRange(qi.value.length, qi.value.length); }catch(e){}
+  }
   bind("qNext", nextQuestion);
   bind("resDone", function(){ S.session=null; render(); });
   bind("resRank", function(){ S.session=null; setTab("rank"); });
@@ -1255,7 +1304,7 @@ function renderRank(){
   h+='<div class="panel" style="margin-top:22px"><div class="panel-h"><h2>How points work</h2></div>'+
      '<div class="chips">'+
      '<span class="chip">Add a word <b>+'+PTS.word+'</b></span>'+
-     '<span class="chip">Quiz answer right <b>+'+PTS.correct+'</b></span>'+
+     '<span class="chip">Word typed correctly <b>+'+PTS.correct+'</b></span>'+
      '<span class="chip">All five right <b>+'+PTS.perfect+'</b></span>'+
      '<span class="chip">Studying <b>0</b></span>'+
      '<span class="chip">Reviews <b>0</b></span>'+
